@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke-linecap="round">
+  <!-- pylon-beacon mark: the probe in transit — a planet (the node) mid-scan,
+       an orbit arc overhead, the bright probe on station with a faint one
+       trailing. Static rendition for READMEs and docs; the animated twin
+       lives on pylonmon.com. Colors for dark backgrounds. -->
+  <circle cx="12" cy="13" r="5.8" stroke="#3ddc97" stroke-width="2.2"/>
+  <path d="M6.8 11.2a6.6 6.6 0 0 1 10.4 0" stroke="#4cc3ff" stroke-width="1.8" opacity=".85"/>
+  <path d="M3 16.6A9.7 9.7 0 1 1 21 16.6" stroke="#8b9dff" stroke-width="2" opacity=".55"/>
+  <circle cx="12" cy="3.3" r="2.4" fill="#4cc3ff"/>
+  <circle cx="12" cy="3.3" r=".95" fill="#7ff0c0"/>
+  <circle cx="2.9" cy="15.3" r="1.5" fill="#8b9dff" opacity=".9"/>
+</svg>
