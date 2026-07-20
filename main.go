@@ -173,6 +173,35 @@ func gather(cfg *config) map[string]any {
 	return metrics
 }
 
+// banner prints the pylon-beacon mark once at startup when stdout is an
+// interactive terminal — never into pipes, service journals, or --once runs.
+// ANSI color only where the terminal advertises support; plain art otherwise.
+func banner(cfg *config) {
+	st, err := os.Stdout.Stat()
+	if err != nil || st.Mode()&os.ModeCharDevice == 0 {
+		return
+	}
+	colorOK := os.Getenv("TERM") != "dumb"
+	if runtime.GOOS == "windows" && os.Getenv("WT_SESSION") == "" && os.Getenv("TERM") == "" && os.Getenv("ANSICON") == "" {
+		colorOK = false // classic conhost has no VT processing unless something enabled it
+	}
+	c := func(code, s string) string {
+		if !colorOK {
+			return s
+		}
+		return "\x1b[" + code + "m" + s + "\x1b[0m"
+	}
+	const peri, mint, blue, core, dim = "38;5;111", "38;5;49", "38;5;81", "38;5;122", "2"
+	fmt.Println()
+	fmt.Println("      " + c(peri, "_.-") + c(core, "o") + c(peri, "-._"))
+	fmt.Println("    " + c(peri, ".'       '.") + "        " + c(core, "pylon-beacon") + " " + c(dim, version))
+	fmt.Println("      " + c(mint, ".-\"\"-."))
+	fmt.Println("     " + c(mint, "/  ") + c(blue, "~~") + c(mint, "  \\") + "          " + c(dim, "node  ") + cfg.Node)
+	fmt.Println("     " + c(mint, "\\      /") + "          " + c(dim, "to    ") + cfg.URL)
+	fmt.Println("      " + c(mint, "`-..-'") + "           " + c(dim, "every ") + strconv.Itoa(cfg.Interval) + "s")
+	fmt.Println()
+}
+
 func main() {
 	cfgPath := flag.String("config", defaultConfigPath(), "path to the config file")
 	once := flag.Bool("once", false, "collect and push a single time, then exit")
@@ -216,6 +245,9 @@ func main() {
 		cfg.Interval = 15
 	}
 
+	if !*once {
+		banner(cfg)
+	}
 	log.Printf("pylon-beacon %s: node %q -> %s every %ds (%d custom metric(s))",
 		version, cfg.Node, cfg.URL, cfg.Interval, len(cfg.Custom))
 
