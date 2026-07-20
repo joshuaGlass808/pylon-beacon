@@ -33,7 +33,7 @@ if (-not (Test-Path $conf)) {
 key      = $key
 url      = $pyurl
 # node   = $env:COMPUTERNAME     # uncomment to override the monitor name
-interval = 60
+interval = 20
 
 [custom]
 # name = command   (first number in the output becomes the metric)

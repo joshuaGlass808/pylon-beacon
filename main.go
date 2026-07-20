@@ -51,7 +51,7 @@ func defaultConfigPath() string {
 // loadConfig parses the ini-ish config: `key = value` lines, comments with #,
 // and a [custom] section whose entries are metric-name = command.
 func loadConfig(path string) (*config, error) {
-	cfg := &config{URL: "https://pylonmon.com", Interval: 60, Custom: map[string]string{}}
+	cfg := &config{URL: "https://pylonmon.com", Interval: 20, Custom: map[string]string{}}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return cfg, err

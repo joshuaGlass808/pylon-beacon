@@ -60,7 +60,7 @@ key      = pm_xxxxxxxxxxxx        # your ingest-scoped PylonMon API key
 # ---- optional ----
 url      = https://pylonmon.com   # your PylonMon instance
 node     = db01                   # monitor name; defaults to this hostname
-interval = 60                     # seconds between pushes (min 15)
+interval = 20                     # seconds between pushes (default 20, min 15)
 
 # ---- extend what it collects ----
 # Each entry under [custom] runs on every push. The FIRST NUMBER found in the
@@ -70,7 +70,15 @@ gpu_temp_c    = nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader
 queue_depth   = redis-cli llen jobs
 zpool_errors  = sh -c "zpool status -x | grep -c 'DEGRADED\|FAULTED'"
 battery_pct   = powershell -c "(Get-CimInstance Win32_Battery).EstimatedChargeRemaining"
+# is the LOCAL site up? 1/0 — pair with a vital rule `site_up < 1`
+site_up       = sh -c "curl -sf http://localhost/ >/dev/null && echo 1 || echo 0"
 ```
+
+**Monitoring a web server?** For *public* up/down, a normal off-site PylonMon
+HTTP monitor is the better tool — it sees what your visitors see. Use the
+`site_up` recipe above for a *local* check the outside world can't do (is the
+app answering on localhost even when the public route is broken?), then set a
+vital rule `site_up < 1` on the node monitor.
 
 Notes on `[custom]`:
 
@@ -94,11 +102,12 @@ Notes on `[custom]`:
 
 ## What happens in PylonMon
 
-- The first push **auto-creates a node monitor** named after the machine
-  (labels `node`, `beacon`). It counts as one monitor against your plan.
-- Deadline = **3× your push interval** (minimum 5 minutes). Miss three pushes
-  and the node is DOWN — alert channels, escalation ladders, and incidents
-  all fire exactly like any PylonMon monitor.
+- The first push **auto-creates a node monitor** named after the machine — a
+  first-class **BEACON** monitor type. It counts as one monitor against your plan.
+- Deadline = **1.5× your push interval** (minimum 30s), so the default 20s
+  agent is flagged DOWN after ~30s of silence — alert channels, escalation
+  ladders, and incidents all fire like any PylonMon monitor. Tune it per node
+  in the monitor's edit form.
 - The monitor's detail card shows the live **🗼 Node vitals** grid — with
   per-vital sparklines from recent pushes and daily min/avg/max trends kept
   for your plan's retention window.

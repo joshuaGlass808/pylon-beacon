@@ -35,7 +35,7 @@ if [ ! -f "$CONF" ]; then
 key      = $KEY
 url      = ${PYLON_URL:-https://pylonmon.com}
 # node   = $(hostname)        # uncomment to override the monitor name
-interval = 60
+interval = 20
 
 [custom]
 # name = command   (first number in the output becomes the metric)
