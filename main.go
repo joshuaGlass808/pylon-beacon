@@ -27,7 +27,7 @@ import (
 	"time"
 )
 
-const version = "0.1.0"
+const version = "0.2.0"
 
 type config struct {
 	Key      string
@@ -35,6 +35,7 @@ type config struct {
 	Node     string
 	Interval int
 	Custom   map[string]string // metric name -> command
+	Logwatch []*logWatch       // [logwatch] entries — see logwatch.go
 }
 
 func defaultConfigPath() string {
@@ -75,6 +76,18 @@ func loadConfig(path string) (*config, error) {
 			if k != "" && v != "" {
 				cfg.Custom[sanitizeMetricName(k)] = v
 			}
+			continue
+		}
+		if section == "logwatch" {
+			if k == "" || v == "" {
+				continue
+			}
+			w, werr := parseLogwatch(sanitizeMetricName(k), v)
+			if werr != nil {
+				fmt.Fprintln(os.Stderr, "logwatch "+k+": "+werr.Error()+" (entry skipped)")
+				continue
+			}
+			cfg.Logwatch = append(cfg.Logwatch, w)
 			continue
 		}
 		switch strings.ToLower(k) {
@@ -136,10 +149,16 @@ func runCustom(command string) (float64, bool) {
 	return f, perr == nil
 }
 
-func push(cfg *config, metrics map[string]any) error {
-	body, _ := json.Marshal(map[string]any{
+func push(cfg *config, metrics map[string]any, samples map[string]string) error {
+	payload := map[string]any{
 		"node": cfg.Node, "interval": cfg.Interval, "metrics": metrics,
-	})
+	}
+	if len(samples) > 0 {
+		// text samples captured by [logwatch] — servers that predate them
+		// simply ignore the field
+		payload["samples"] = samples
+	}
+	body, _ := json.Marshal(payload)
 	req, err := http.NewRequest("POST", cfg.URL+"/api/ingest/exporter", bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -162,15 +181,20 @@ func push(cfg *config, metrics map[string]any) error {
 	return nil
 }
 
-// gather runs the platform collectors plus every [custom] command.
-func gather(cfg *config) map[string]any {
+// gather runs the platform collectors, every [custom] command, and every
+// [logwatch] scan. The second return value is the logwatch text samples.
+func gather(cfg *config) (map[string]any, map[string]string) {
 	metrics := collect() // platform-specific (collect_linux.go / collect_windows.go)
 	for name, command := range cfg.Custom {
 		if v, ok := runCustom(command); ok {
 			metrics[name] = v
 		}
 	}
-	return metrics
+	counts, samples := scanLogwatches(cfg.Logwatch)
+	for name, n := range counts {
+		metrics[name] = n
+	}
+	return metrics, samples
 }
 
 // banner prints the pylon-beacon mark once at startup when stdout is an
@@ -248,12 +272,12 @@ func main() {
 	if !*once {
 		banner(cfg)
 	}
-	log.Printf("pylon-beacon %s: node %q -> %s every %ds (%d custom metric(s))",
-		version, cfg.Node, cfg.URL, cfg.Interval, len(cfg.Custom))
+	log.Printf("pylon-beacon %s: node %q -> %s every %ds (%d custom metric(s), %d log watch(es))",
+		version, cfg.Node, cfg.URL, cfg.Interval, len(cfg.Custom), len(cfg.Logwatch))
 
 	for {
-		metrics := gather(cfg)
-		if err := push(cfg, metrics); err != nil {
+		metrics, samples := gather(cfg)
+		if err := push(cfg, metrics, samples); err != nil {
 			log.Printf("push failed (will retry): %v", err)
 		} else {
 			log.Printf("pushed %d metric(s)", len(metrics))
