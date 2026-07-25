@@ -89,6 +89,41 @@ Notes on `[custom]`:
 - Name metrics with units in the suffix (`_pct`, `_c`, `_s`) and PylonMon
   formats them accordingly.
 
+## Watching logs: `[logwatch]`
+
+Some problems are a *rate*, not a state: a few Python tracebacks an hour is
+life on the internet; forty in five minutes is an incident. Each `[logwatch]`
+entry tails a file, counts regex matches inside a rolling window, and reports
+the count as a normal metric — so a PylonMon vital rule with a sustained gate
+does the judging. The latest matched block (a whole traceback, not just the
+first line) rides along with the push, so a breach page can show you the
+actual error.
+
+```ini
+# name = <file> | <regex, Go syntax, matched per line> | <window seconds>
+[logwatch]
+tracebacks_5m = /var/log/app/app.log | Traceback \(most recent call last\): | 300
+oom_kills     = /var/log/kern.log    | Out of memory | 3600
+http_500s     = /var/log/nginx/access.log | " 500 | 300
+```
+
+Then on the node monitor in PylonMon: `tracebacks_5m > 20 sustained 60s` →
+the page arrives with the count *and* the most recent traceback.
+
+Notes on `[logwatch]`:
+
+- Reading is incremental — only what the file grew since the last push is
+  scanned, capped at 4 MB per cycle so a log flood can't stall the beacon.
+- On first start the watch begins at the **end** of the file: installing the
+  beacon never pages you about last week's errors.
+- Truncation and rotation are detected (file shrank) and the watch restarts
+  from the top of the new file.
+- Block capture is traceback-shaped: the matched line, its indented
+  continuation lines, and the first non-indented line after them (the
+  `SomeError: message` at the bottom), capped at 40 lines / 4 KB.
+- The window defaults to 300s; minimum 15s. Name entries like metrics
+  (`_5m`, `_1h` suffixes read well on the dashboard).
+
 ## Built-in collectors
 
 | Metric        | Linux source              | Windows source            |
@@ -129,6 +164,12 @@ curl -X POST https://pylonmon.com/api/ingest/exporter \
 
 `metrics` accepts numbers and one level of nesting (for per-mount disk and
 the like). Up to 40 metrics per push.
+
+`[logwatch]` entries add an optional top-level `samples` object —
+`{"samples":{"tracebacks_5m":"Traceback (most recent call last):
+…"}}` — with
+the latest matched block per watch (≤4 KB each). Servers that predate samples
+simply ignore the field.
 
 ## Service management
 
