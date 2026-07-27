@@ -36,6 +36,7 @@ type config struct {
 	Interval int
 	Custom   map[string]string // metric name -> command
 	Logwatch []*logWatch       // [logwatch] entries — see logwatch.go
+	SNMP     *snmpConfig       // [snmp] section — see snmp.go
 }
 
 func defaultConfigPath() string {
@@ -75,6 +76,33 @@ func loadConfig(path string) (*config, error) {
 		if section == "custom" {
 			if k != "" && v != "" {
 				cfg.Custom[sanitizeMetricName(k)] = v
+			}
+			continue
+		}
+		if section == "snmp" {
+			if k == "" || v == "" {
+				continue
+			}
+			if cfg.SNMP == nil {
+				cfg.SNMP = &snmpConfig{OIDs: map[string]string{}}
+			}
+			// A few reserved keys configure the connection; every OTHER key is
+			// a metric name whose value is the OID to read.
+			switch strings.ToLower(k) {
+			case "target", "host", "address":
+				cfg.SNMP.Target = v
+			case "community":
+				cfg.SNMP.Community = v
+			case "timeout":
+				if n, err := strconv.Atoi(v); err == nil && n > 0 {
+					cfg.SNMP.TimeoutMS = n * 1000
+				}
+			case "version":
+				if v != "2c" && v != "v2c" && v != "2" {
+					fmt.Fprintln(os.Stderr, "snmp: only v2c is supported (got "+v+"); continuing as v2c")
+				}
+			default:
+				cfg.SNMP.OIDs[sanitizeMetricName(k)] = v
 			}
 			continue
 		}
@@ -189,6 +217,9 @@ func gather(cfg *config) (map[string]any, map[string]string) {
 		if v, ok := runCustom(command); ok {
 			metrics[name] = v
 		}
+	}
+	for name, v := range collectSNMP(cfg.SNMP) {
+		metrics[name] = v
 	}
 	counts, samples := scanLogwatches(cfg.Logwatch)
 	for name, n := range counts {

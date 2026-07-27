@@ -89,6 +89,47 @@ Notes on `[custom]`:
 - Name metrics with units in the suffix (`_pct`, `_c`, `_s`) and PylonMon
   formats them accordingly.
 
+## Watching network gear: `[snmp]`
+
+Switches, firewalls, APs, NAS boxes, PDUs and printers rarely run an agent —
+but almost all of them speak SNMP. Point `[snmp]` at one and its readings become
+ordinary metrics, with the same thresholds, alerts and incidents as CPU or disk.
+
+```ini
+[snmp]
+target    = 192.168.1.1     # host or host:port (default 161)
+community = public          # v2c read community
+timeout   = 3               # seconds per poll
+
+# Every other key is a metric name = the OID to read.
+uptime_ticks   = .1.3.6.1.2.1.1.3.0          # sysUpTime
+wan_in_octets  = .1.3.6.1.2.1.2.2.1.10.1     # ifInOctets on interface 1
+wan_out_octets = .1.3.6.1.2.1.2.2.1.16.1     # ifOutOctets on interface 1
+wan_oper       = .1.3.6.1.2.1.2.2.1.8.1      # ifOperStatus: 1 = up
+```
+
+**`snmp_up` is always reported — 1 or 0.** This is the important bit. A metric
+that simply *stops arriving* does not alert: PylonMon skips a vital rule whose
+metric is missing from a push. So if the device dies, its readings vanish and
+nothing pages you. `snmp_up` turns that silence into a value you can alert on —
+set a vital rule **`snmp_up < 1`** and you'll know.
+
+Notes:
+
+- **SNMPv2c only**, read-only, and the beacon only ever issues GETs — it can
+  never write to your gear.
+- The polling happens **on your LAN**, from the beacon. Nothing is exposed to
+  the internet; only the results go out, over the same outbound push as
+  everything else. That's the difference from every other SNMP tool, which
+  wants to reach *into* your network.
+- Non-numeric answers (device name, location) are ignored — they're not metrics.
+- A missing OID is reported as *nothing*, never as `0`. A device that doesn't
+  implement an OID shouldn't look like a genuine reading of zero.
+- Enable SNMP on the device first. On UniFi that's
+  **Settings → System → Advanced → SNMP** (availability varies by UniFi OS
+  version). Vendor-specific OIDs live in that vendor's MIB; the standard
+  MIB-II OIDs above work on essentially anything.
+
 ## Watching logs: `[logwatch]`
 
 Some problems are a *rate*, not a state: a few Python tracebacks an hour is
