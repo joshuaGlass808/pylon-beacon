@@ -28,13 +28,13 @@ func TestLiveAgent(t *testing.T) {
 		Community: community,
 		TimeoutMS: 3000,
 		OIDs: map[string]string{
-			// standard MIB-II — implemented by essentially every SNMP device
-			"uptime_ticks": ".1.3.6.1.2.1.1.3.0", // TimeTicks
-			"if1_in":       ".1.3.6.1.2.1.2.2.1.10.1", // Counter32
-			"if1_oper":     ".1.3.6.1.2.1.2.2.1.8.1",  // INTEGER
+			// standard MIB-II, one per numeric type this agent serves
+			"uptime_ticks": ".1.3.6.1.2.1.1.3.0",    // TimeTicks 0x43
+			"sys_services": ".1.3.6.1.2.1.1.7.0",    // INTEGER   0x02
+			"num_users":    ".1.3.6.1.2.1.25.1.5.0", // Gauge32   0x42 — reads 0 here
 			// non-numeric: must be polled without error and then ignored
 			"sys_name": ".1.3.6.1.2.1.1.5.0", // OCTET STRING
-			// deliberately absent: must not appear, and must not read as 0
+			// deliberately absent: must not appear, and must NOT read as 0
 			"bogus": ".1.3.6.1.4.1.99999.1.2.3.0",
 		},
 	}
@@ -44,8 +44,16 @@ func TestLiveAgent(t *testing.T) {
 	if m["snmp_up"] != 1 {
 		t.Fatalf("snmp_up = %v, want 1 (is the agent reachable at %s?)", m["snmp_up"], target)
 	}
-	if _, ok := m["uptime_ticks"]; !ok {
-		t.Error("sysUpTime (TimeTicks) did not decode to a metric")
+	for _, k := range []string{"uptime_ticks", "sys_services", "num_users"} {
+		if _, ok := m[k]; !ok {
+			t.Errorf("%s did not decode to a metric", k)
+		}
+	}
+	// THE distinction that matters: a real zero is a reading; a missing OID is
+	// not. num_users legitimately reads 0 on this agent, and bogus does not
+	// exist — they must not look the same.
+	if v, ok := m["num_users"]; !ok || v != 0 {
+		t.Errorf("num_users should be present and 0 (a genuine zero reading), got %v present=%v", v, ok)
 	}
 	if _, ok := m["sys_name"]; ok {
 		t.Error("sysName is an OCTET STRING and must NOT become a metric")
