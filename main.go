@@ -27,7 +27,7 @@ import (
 	"time"
 )
 
-const version = "0.4.0"
+const version = "0.4.1"
 
 type config struct {
 	Key      string
@@ -391,23 +391,59 @@ func main() {
 	pushLoop(cfg, period, tick.C, *once, nil)
 }
 
-// pushLoop is the beacon's main loop, kept out of main() so the period is
-// testable. tick supplies the cadence; stop, when non-nil, ends the loop.
+// pushLoop is the beacon's main loop, kept out of main() so the cadence is
+// testable. tick supplies the period; stop, when non-nil, ends the loop.
+//
+// COLLECTION HAPPENS DURING THE WAIT, AND THE PUSH GOES OUT ON THE TICK.
+//
+// Ticking alone fixes the average but not the spread. With gather-then-push,
+// consecutive check-ins land period + (this cycle's cost - the previous
+// cycle's cost) apart, so a node whose collection cost VARIES still jitters
+// either side of its interval even though it averages exactly right. Measured
+// on a node with slow, variable collection after the loop became a ticker, 57
+// check-ins: mean 20.1s — correct — but p90 25s and max 28s against a 30s
+// silence window. Two seconds of margin is not a fix, it is a smaller version
+// of the same bug.
+//
+// Gathering before the wait and pushing the moment the tick arrives removes
+// collection from the equation entirely: check-ins land one period apart plus
+// only the variance of the HTTP request itself. Same node, same commands.
+//
+// The cost is that metrics are up to one period old when they land. At any
+// interval you would actually run, that is invisible — the vitals were a point
+// sample of one instant regardless, and the graph's resolution is the interval.
+// A late check-in, by contrast, is a false page.
+//
+// The FIRST check-in still goes out immediately rather than waiting a full
+// period. That matters on restart: the agent has usually just been silent for
+// some fraction of its window already, and adding a whole period before
+// speaking up would page the very customer this change exists to protect.
 func pushLoop(cfg *config, period time.Duration, tick <-chan time.Time, once bool, stop <-chan struct{}) {
-	for {
-		metrics, samples := gather(cfg, period/2)
+	send := func(metrics map[string]any, samples map[string]string) {
 		if err := push(cfg, metrics, samples); err != nil {
 			log.Printf("push failed (will retry): %v", err)
-		} else {
-			log.Printf("pushed %d metric(s)", len(metrics))
-		}
-		if once {
 			return
 		}
+		log.Printf("pushed %d metric(s)", len(metrics))
+	}
+
+	// Announce ourselves straight away — see above.
+	metrics, samples := gather(cfg, period/2)
+	send(metrics, samples)
+	if once {
+		return
+	}
+
+	for {
+		// Collect for the NEXT check-in while we are waiting for it, so that
+		// however long this takes, it is spent inside the period rather than
+		// added to it.
+		metrics, samples = gather(cfg, period/2)
 		select {
 		case <-tick:
 		case <-stop:
 			return
 		}
+		send(metrics, samples)
 	}
 }

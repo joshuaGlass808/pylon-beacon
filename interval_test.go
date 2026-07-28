@@ -103,6 +103,113 @@ func TestPushPeriodIgnoresCollectionTime(t *testing.T) {
 	}
 }
 
+// TestPushPeriodSurvivesVARYINGCollectionTime is the second half of the same
+// bug, and the reason gathering moved to before the wait.
+//
+// A ticker alone fixes the MEAN but not the SPREAD: with gather-then-push,
+// consecutive check-ins land period + (this cycle's cost - the previous
+// cycle's cost) apart, so a node whose collection cost varies still swings
+// either side of its interval. Measured in production after the loop became a
+// ticker — 57 check-ins, mean 20.1s (correct) but max 28s against a 30s
+// window. The average was right and the customer would still have been paged.
+//
+// Here collection alternates fast/slow on purpose. Gaps must stay near the
+// period regardless.
+func TestPushPeriodSurvivesVaryingCollectionTime(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a POSIX shell for the alternating custom command")
+	}
+	var mu sync.Mutex
+	var arrivals []time.Time
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		arrivals = append(arrivals, time.Now())
+		mu.Unlock()
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	const period = 700 * time.Millisecond
+	counter := t.TempDir() + "/n"
+	cfg := &config{
+		Key: "test-key", URL: srv.URL, Node: "t", Interval: 1,
+		// Every other cycle costs ~450ms, the rest are instant. Under
+		// gather-then-push that alternation shows up directly in the gaps as
+		// period +/- 450ms; with the push anchored to the tick it cannot.
+		Custom: map[string]string{
+			"alternating": "n=$(cat " + counter + " 2>/dev/null || echo 0); " +
+				"echo $((n+1)) > " + counter + "; " +
+				"[ $((n%2)) -eq 0 ] && sleep 0.45; echo 1",
+		},
+	}
+
+	stop := make(chan struct{})
+	tick := time.NewTicker(period)
+	defer tick.Stop()
+	done := make(chan struct{})
+	go func() { defer close(done); pushLoop(cfg, period, tick.C, false, stop) }()
+
+	count := func() int { mu.Lock(); defer mu.Unlock(); return len(arrivals) }
+	if !waitFor(8*time.Second, func() bool { return count() >= 5 }) {
+		close(stop)
+		<-done
+		t.Fatalf("only %d pushes arrived", count())
+	}
+	close(stop)
+	<-done
+
+	mu.Lock()
+	got := append([]time.Time(nil), arrivals...)
+	mu.Unlock()
+
+	// Skip the first gap: the opening check-in is deliberately immediate, so
+	// that interval is short by design (see pushLoop).
+	const slack = 200 * time.Millisecond
+	for i := 2; i < len(got); i++ {
+		gap := got[i].Sub(got[i-1])
+		if gap < period-slack || gap > period+slack {
+			t.Errorf("gap %d was %v, want %v +/- %v — collection cost is still leaking "+
+				"into the cadence", i, gap, period, slack)
+		}
+	}
+}
+
+// TestFirstPushIsImmediate. Gathering before the wait must not delay the
+// opening check-in by a whole period: a restarting agent has usually already
+// been quiet for part of its window, and spending another full interval before
+// speaking would page exactly the customer this is meant to protect.
+func TestFirstPushIsImmediate(t *testing.T) {
+	got := make(chan time.Time, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case got <- time.Now():
+		default:
+		}
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	const period = 3 * time.Second
+	cfg := &config{Key: "k", URL: srv.URL, Node: "t", Interval: 3}
+	stop := make(chan struct{})
+	tick := time.NewTicker(period)
+	defer tick.Stop()
+	start := time.Now()
+	done := make(chan struct{})
+	go func() { defer close(done); pushLoop(cfg, period, tick.C, false, stop) }()
+	defer func() { close(stop); <-done }()
+
+	select {
+	case at := <-got:
+		if d := at.Sub(start); d > period/2 {
+			t.Errorf("first check-in took %v — it is waiting for a tick instead of "+
+				"announcing immediately", d)
+		}
+	case <-time.After(period):
+		t.Fatal("no check-in within one full period — the agent is silent on start")
+	}
+}
+
 // TestCustomCommandsRunConcurrently. Serially, N commands cost the SUM of their
 // runtimes, and each one is allowed 10 seconds — so the collection phase was
 // bounded only by 10s x N. Seven commands, as our own production config has,
