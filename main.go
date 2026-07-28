@@ -27,7 +27,7 @@ import (
 	"time"
 )
 
-const version = "0.3.0"
+const version = "0.4.0"
 
 type config struct {
 	Key      string
@@ -209,14 +209,67 @@ func push(cfg *config, metrics map[string]any, samples map[string]string) error 
 	return nil
 }
 
+// runCustomAll executes every [custom] command CONCURRENTLY and returns the
+// metrics that produced a number.
+//
+// They used to run one after another. Each command is capped at 10 seconds
+// (runCustom), so the collection phase was bounded only by 10s x however many
+// commands you configured — with seven of them, 70 seconds, which is longer
+// than any sane interval. Collection time is dead time: it is time the node is
+// not checking in, and the server is judging silence.
+//
+// Concurrently, the phase costs the SLOWEST command rather than their sum, and
+// the whole phase is bounded by deadline so one wedged command cannot push the
+// cycle past the interval either. Commands are independent by definition — each
+// one's first number becomes one metric — so nothing depends on their order.
+//
+// Concurrency is capped so a config with many commands cannot fork a hundred
+// shells at once on a small box.
+func runCustomAll(custom map[string]string, deadline time.Duration) map[string]float64 {
+	out := map[string]float64{}
+	if len(custom) == 0 {
+		return out
+	}
+	const maxParallel = 4
+	type res struct {
+		name string
+		v    float64
+		ok   bool
+	}
+	ch := make(chan res, len(custom))
+	slots := make(chan struct{}, maxParallel)
+	for name, command := range custom {
+		go func(name, command string) {
+			slots <- struct{}{}
+			defer func() { <-slots }()
+			v, ok := runCustom(command)
+			ch <- res{name, v, ok}
+		}(name, command)
+	}
+	timeout := time.After(deadline)
+	for range custom {
+		select {
+		case r := <-ch:
+			if r.ok {
+				out[r.name] = r.v
+			}
+		case <-timeout:
+			// Whatever has not answered by now is dropped for THIS cycle. A
+			// missing metric is a gap in a graph; a late push is a false page.
+			return out
+		}
+	}
+	return out
+}
+
 // gather runs the platform collectors, every [custom] command, and every
 // [logwatch] scan. The second return value is the logwatch text samples.
-func gather(cfg *config) (map[string]any, map[string]string) {
+//
+// budget bounds the custom-command phase — see runCustomAll.
+func gather(cfg *config, budget time.Duration) (map[string]any, map[string]string) {
 	metrics := collect() // platform-specific (collect_linux.go / collect_windows.go)
-	for name, command := range cfg.Custom {
-		if v, ok := runCustom(command); ok {
-			metrics[name] = v
-		}
+	for name, v := range runCustomAll(cfg.Custom, budget) {
+		metrics[name] = v
 	}
 	for name, v := range collectSNMP(cfg.SNMP) {
 		metrics[name] = v
@@ -306,16 +359,55 @@ func main() {
 	log.Printf("pylon-beacon %s: node %q -> %s every %ds (%d custom metric(s), %d log watch(es))",
 		version, cfg.Node, cfg.URL, cfg.Interval, len(cfg.Custom), len(cfg.Logwatch))
 
+	// The loop is a fixed-period TICKER, not sleep-after-work.
+	//
+	// It used to end each pass with time.Sleep(interval), which makes the
+	// interval the GAP BETWEEN cycles rather than the period. The real period
+	// was interval + however long that cycle happened to take, so any node
+	// whose collection is slow drifts silently past the silence window the
+	// server is measuring it against.
+	//
+	// Measured on a production node, 2026-07-28 — a beacon configured
+	// interval = 20 against a 30s server-side SLA, 444 pushes over three hours:
+	//
+	//	min 21s   p50 24s   p90 27s   p99 30s   max 31s   mean 24.3s
+	//
+	// It never once pushed at 20s. Its ~4s cycle had quietly spent 4.3s of the
+	// 10s of headroom the configuration promised, so an ordinary tail spike
+	// crossed the line and the node was paged as silent while it was healthy
+	// and pushing. A second node with a 0.2s cycle sat at a mean of 20.4s and
+	// was never paged — same build, same config, different collection cost.
+	//
+	// A ticker makes the period the period: collection time comes OUT of the
+	// wait instead of being added to it. Go drops missed ticks rather than
+	// queueing them, which is the behaviour we want — a cycle that overruns
+	// costs one skipped push, never a catch-up burst.
+	//
+	// The custom-command phase is separately bounded (runCustomAll) so that a
+	// cycle cannot outlast the interval and reintroduce the drift.
+	period := time.Duration(cfg.Interval) * time.Second
+	tick := time.NewTicker(period)
+	defer tick.Stop()
+	pushLoop(cfg, period, tick.C, *once, nil)
+}
+
+// pushLoop is the beacon's main loop, kept out of main() so the period is
+// testable. tick supplies the cadence; stop, when non-nil, ends the loop.
+func pushLoop(cfg *config, period time.Duration, tick <-chan time.Time, once bool, stop <-chan struct{}) {
 	for {
-		metrics, samples := gather(cfg)
+		metrics, samples := gather(cfg, period/2)
 		if err := push(cfg, metrics, samples); err != nil {
 			log.Printf("push failed (will retry): %v", err)
 		} else {
 			log.Printf("pushed %d metric(s)", len(metrics))
 		}
-		if *once {
+		if once {
 			return
 		}
-		time.Sleep(time.Duration(cfg.Interval) * time.Second)
+		select {
+		case <-tick:
+		case <-stop:
+			return
+		}
 	}
 }

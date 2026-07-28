@@ -1,0 +1,28 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.22" }
+      - run: go build ./...
+      - run: go vet ./...
+      # Several tests drive real commands through a POSIX shell and skip on
+      # Windows, which is where this repo is usually edited. Without a Linux
+      # test run they were effectively running nowhere: a timing bug in the
+      # push loop shipped in 0.2.0 and was only caught from production data.
+      - run: go test -race ./...
+      # The agent is installed on machines we do not control, so every target
+      # in the release matrix must at least compile on every push, not only
+      # when a tag is cut.
+      - name: cross-compile the release matrix
+        run: |
+          for t in linux/amd64 linux/arm64 linux/arm windows/amd64 darwin/arm64 darwin/amd64; do
+            echo "--- $t"
+            CGO_ENABLED=0 GOOS=${t%/*} GOARCH=${t#*/} go build -trimpath -o /dev/null .
+          done
