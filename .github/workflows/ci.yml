@@ -16,7 +16,10 @@ jobs:
       # Windows, which is where this repo is usually edited. Without a Linux
       # test run they were effectively running nowhere: a timing bug in the
       # push loop shipped in 0.2.0 and was only caught from production data.
-      - run: go test -race ./...
+      # -v on purpose: the log must show whether those tests RAN or skipped.
+      # "ok, 4s" cannot tell you the difference, and a silently skipped test
+      # is indistinguishable from a passing one.
+      - run: go test -race -v ./...
       # The agent is installed on machines we do not control, so every target
       # in the release matrix must at least compile on every push, not only
       # when a tag is cut.
