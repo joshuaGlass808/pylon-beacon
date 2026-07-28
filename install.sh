@@ -21,8 +21,18 @@ case "$(uname -m)" in
 esac
 
 echo "-> downloading pylon-beacon (linux/$ARCH)…"
-curl -fsSL -o "$BIN" "https://github.com/$REPO/releases/latest/download/pylon-beacon-linux-$ARCH"
-chmod +x "$BIN"
+# Download beside the target and rename into place, rather than writing over
+# $BIN directly. On Linux, opening a RUNNING executable for writing fails with
+# ETXTBSY, so `curl -o $BIN` works on a first install and fails on every
+# upgrade — the case that matters once the agent is deployed. A rename is
+# atomic and is fine while the old binary is executing: the running process
+# keeps its inode and picks up the new one at the restart below. It also means
+# a download that dies halfway can never leave a truncated binary in place.
+TMP="$BIN.new.$$"
+trap 'rm -f "$TMP"' EXIT
+curl -fsSL -o "$TMP" "https://github.com/$REPO/releases/latest/download/pylon-beacon-linux-$ARCH"
+chmod +x "$TMP"
+mv -f "$TMP" "$BIN"
 
 if [ ! -f "$CONF" ]; then
   KEY="${PYLON_KEY:-}"
@@ -63,7 +73,11 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now pylon-beacon
+systemctl enable pylon-beacon
+# restart, not `enable --now`: --now STARTS a stopped unit but does nothing to
+# one that is already running, so re-running this script to upgrade would leave
+# the previous binary serving and report success.
+systemctl restart pylon-beacon
 echo ""
 echo "✓ pylon-beacon is running. Your node appears in PylonMon within a minute."
 echo "  status:  systemctl status pylon-beacon"
