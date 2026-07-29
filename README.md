@@ -130,6 +130,52 @@ Notes:
   version). Vendor-specific OIDs live in that vendor's MIB; the standard
   MIB-II OIDs above work on essentially anything.
 
+## Watching Proxmox: `[proxmox]`
+
+On a hypervisor, the host is the least interesting half of the picture. It can
+sit at 4% CPU with plenty of free memory while a VM has been off since Tuesday.
+Add one section on the Proxmox host and the agent reports the *cluster's*
+inventory alongside the host's own vitals:
+
+```ini
+[proxmox]
+enabled = true
+```
+
+That's the whole configuration. The agent runs as root on the host, so it uses
+the `pvesh` CLI that's already installed and already authenticated — no API
+token to create, store, or rotate. It works the same on a standalone host as on
+a cluster; Proxmox reports a single-node "cluster".
+
+| Metric | What it is |
+|---|---|
+| `pve_qemu_running` / `_stopped` / `_total` | VMs |
+| `pve_lxc_running` / `_stopped` / `_total` | LXC containers |
+| `pve_guests_stopped` | every non-template guest that isn't running |
+| `pve_nodes_online` / `_total` | cluster members |
+| `pve_storage_pct` | the **fullest** storage, not an average |
+| `pve_quorate` | `1` with quorum, `0` without (clusters only) |
+
+Then a PylonMon vital rule does the judging — for example `pve_guests_stopped`
+above `0` for 5 minutes, or `pve_storage_pct` above `85`. When guests are down,
+the push also carries the *names* (`vm/102 db-01 on pve1`), so the alert tells
+you what to go and start rather than just how many.
+
+Notes:
+
+- **Templates are never counted as stopped.** A template's status is `stopped`
+  forever by definition; counting them would page every user who has one.
+- **`pve_storage_pct` is the fullest pool**, deliberately. An average across one
+  full pool and three empty ones hides the one that's about to break backups.
+- Counters are reported at `0` when healthy, not omitted — a metric that only
+  appears once something is wrong can't be graphed, and a threshold on a metric
+  that's never been seen is never evaluated.
+- If `pvesh` is missing, times out, or returns something unrecognisable, the
+  integration reports **nothing** rather than zeros. "No data" and "everything
+  is gone" must not look the same.
+- `timeout` (seconds, default 8) and `bin` (path to `pvesh`) are available if
+  you need them.
+
 ## Watching logs: `[logwatch]`
 
 Some problems are a *rate*, not a state: a few Python tracebacks an hour is

@@ -27,7 +27,7 @@ import (
 	"time"
 )
 
-const version = "0.4.2"
+const version = "0.5.0"
 
 type config struct {
 	Key      string
@@ -37,6 +37,7 @@ type config struct {
 	Custom   map[string]string // metric name -> command
 	Logwatch []*logWatch       // [logwatch] entries — see logwatch.go
 	SNMP     *snmpConfig       // [snmp] section — see snmp.go
+	Proxmox  *proxmoxConfig    // [proxmox] section — see proxmox.go
 }
 
 func defaultConfigPath() string {
@@ -118,6 +119,32 @@ func loadConfig(path string) (*config, error) {
 			cfg.Logwatch = append(cfg.Logwatch, w)
 			continue
 		}
+		// [proxmox] — reports the hypervisor's guests, storage and quorum, not
+		// just the host it runs on. The whole section is usually two words:
+		//
+		//	[proxmox]
+		//	enabled = true
+		if section == "proxmox" {
+			if k == "" {
+				continue
+			}
+			if cfg.Proxmox == nil {
+				cfg.Proxmox = &proxmoxConfig{}
+			}
+			switch strings.ToLower(k) {
+			case "enabled", "on":
+				cfg.Proxmox.Enabled = truthy(v)
+			case "pvesh", "bin":
+				cfg.Proxmox.Bin = v
+			case "timeout":
+				if n, err := strconv.Atoi(v); err == nil && n > 0 {
+					cfg.Proxmox.TimeoutMS = n * 1000
+				}
+			default:
+				fmt.Fprintln(os.Stderr, "proxmox: unknown setting "+k+" (ignored)")
+			}
+			continue
+		}
 		switch strings.ToLower(k) {
 		case "key":
 			cfg.Key = v
@@ -141,6 +168,16 @@ func sanitizeMetricName(s string) string {
 		s = s[:48]
 	}
 	return s
+}
+
+// truthy accepts the spellings people actually type in a config file. Anything
+// else is false, so a typo turns a section OFF rather than silently on.
+func truthy(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on", "enabled":
+		return true
+	}
+	return false
 }
 
 var numRe = regexp.MustCompile(`-?\d+(\.\d+)?`)
@@ -333,6 +370,20 @@ func gather(cfg *config, budget time.Duration) (map[string]any, map[string]strin
 	counts, samples := scanLogwatches(cfg.Logwatch)
 	for name, n := range counts {
 		metrics[name] = n
+	}
+	// Proxmox: the guests, storage and quorum of the hypervisor this agent runs
+	// on. Merged last, and its sample (which guests are stopped) is added
+	// alongside any [logwatch] samples rather than replacing them.
+	if pm, psamples := collectProxmox(cfg.Proxmox); pm != nil {
+		for name, v := range pm {
+			metrics[name] = v
+		}
+		for name, s := range psamples {
+			if samples == nil {
+				samples = map[string]string{}
+			}
+			samples[name] = s
+		}
 	}
 	return metrics, samples
 }
