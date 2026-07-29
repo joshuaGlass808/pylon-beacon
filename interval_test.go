@@ -174,6 +174,85 @@ func TestPushPeriodSurvivesVaryingCollectionTime(t *testing.T) {
 	}
 }
 
+// A failed push must not cost a whole interval.
+//
+// The loop used to log the failure and wait for the next tick, so one blip
+// became a period-plus gap in the server's view — on a 20s beacon against a
+// 30s silence window, a page. Over seven days across three nodes there were 17
+// such failures, and one of them paged at 13:00 on 2026-07-28. In that case the
+// server had actually RECEIVED the check-in and was merely too slow to answer,
+// so a delivery that landed was discarded and the node reported silent.
+func TestFailedPushRetriesWithinTheInterval(t *testing.T) {
+	var mu sync.Mutex
+	var arrivals []time.Time
+	fail := true
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		first := fail
+		fail = false
+		if !first {
+			arrivals = append(arrivals, time.Now())
+		}
+		mu.Unlock()
+		if first {
+			// the shape of the real failure: received, but no usable answer
+			w.WriteHeader(502)
+			return
+		}
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	const period = 4 * time.Second // budget 2s, so 1s per attempt
+	cfg := &config{Key: "k", URL: srv.URL, Node: "t", Interval: 4}
+	stop := make(chan struct{})
+	tick := time.NewTicker(period)
+	defer tick.Stop()
+	start := time.Now()
+	done := make(chan struct{})
+	go func() { defer close(done); pushLoop(cfg, period, tick.C, false, stop) }()
+	defer func() { close(stop); <-done }()
+
+	ok := waitFor(period-500*time.Millisecond, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(arrivals) > 0
+	})
+	if !ok {
+		t.Fatalf("no successful check-in within one interval — the retry is waiting for the next tick, "+
+			"which is exactly the bug (elapsed %v)", time.Since(start))
+	}
+	mu.Lock()
+	at := arrivals[0].Sub(start)
+	mu.Unlock()
+	if at > period/2 {
+		t.Errorf("the retry landed after %v; it should follow the failure immediately, well inside the %v period", at, period)
+	}
+}
+
+// TestPushBudgetNeverEatsTheWholeInterval. Delivery gets half the period at
+// most, so a stalled server cannot consume the slot that collection and the
+// next tick need. A check-in still trying to be delivered when its successor
+// is due has already missed.
+func TestPushBudgetNeverEatsTheWholeInterval(t *testing.T) {
+	for _, period := range []time.Duration{
+		15 * time.Second, 20 * time.Second, 60 * time.Second, 5 * time.Minute,
+	} {
+		b := pushBudget(period)
+		if b > period/2 {
+			t.Errorf("period %v: budget %v exceeds half the interval", period, b)
+		}
+		if per := b / pushAttempts; per <= 0 {
+			t.Errorf("period %v: per-attempt timeout collapsed to %v", period, per)
+		}
+	}
+	// A normal push is ~200ms. The per-attempt deadline must stay far above
+	// that at every sane interval, or a merely slow server reads as a failure.
+	if per := pushBudget(20*time.Second) / pushAttempts; per < 2*time.Second {
+		t.Errorf("per-attempt timeout at a 20s interval is %v — too tight against ~200ms normal latency", per)
+	}
+}
+
 // TestFirstPushIsImmediate. Gathering before the wait must not delay the
 // opening check-in by a whole period: a restarting agent has usually already
 // been quiet for part of its window, and spending another full interval before

@@ -27,7 +27,7 @@ import (
 	"time"
 )
 
-const version = "0.4.1"
+const version = "0.4.2"
 
 type config struct {
 	Key      string
@@ -177,7 +177,7 @@ func runCustom(command string) (float64, bool) {
 	return f, perr == nil
 }
 
-func push(cfg *config, metrics map[string]any, samples map[string]string) error {
+func push(cfg *config, metrics map[string]any, samples map[string]string, timeout time.Duration) error {
 	payload := map[string]any{
 		"node": cfg.Node, "interval": cfg.Interval, "metrics": metrics,
 	}
@@ -194,7 +194,7 @@ func push(cfg *config, metrics map[string]any, samples map[string]string) error 
 	req.Header.Set("Authorization", "Bearer "+cfg.Key)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "pylon-beacon/"+version+" ("+runtime.GOOS+")")
-	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	resp, err := (&http.Client{Timeout: timeout}).Do(req)
 	if err != nil {
 		return err
 	}
@@ -207,6 +207,62 @@ func push(cfg *config, metrics map[string]any, samples map[string]string) error 
 		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, e.Error)
 	}
 	return nil
+}
+
+// pushBudget splits the interval between delivering this check-in and
+// collecting the next one. Half each: a check-in that spends the whole period
+// trying to be delivered has already missed its slot.
+func pushBudget(period time.Duration) time.Duration {
+	b := period / 2
+	if b > 10*time.Second {
+		b = 10 * time.Second // long intervals do not need a long deadline
+	}
+	if b < 500*time.Millisecond {
+		b = 500 * time.Millisecond
+	}
+	return b
+}
+
+// pushAttempts is deliberately small. The point is to survive a BLIP, not to
+// hammer a server that is genuinely down — if it is down, the silence is the
+// signal and that is the product working.
+const pushAttempts = 2
+
+// sendCheckIn delivers one check-in, retrying briefly instead of surrendering
+// the whole interval.
+//
+// WHY. A single failed push used to cost a full period, because the loop just
+// logged it and waited for the next tick. On a 20s beacon against a 30s
+// silence window that turns one transient failure into a 40s+ gap — which is a
+// page. Over seven days across three nodes: 17 failures, and today one of them
+// paged the founder at 13:00. The check-in HAD been received; the server was
+// simply too slow to answer, so a delivery that actually landed was thrown
+// away and the node reported silent.
+//
+// Retrying inside the interval turns that into a sub-second hiccup. Each
+// attempt gets half the budget, so two attempts fit with room to spare, and a
+// normal push takes ~200ms against a multi-second deadline — 20x headroom, so
+// a merely slow server is not mistaken for a failed one.
+//
+// Re-sending a check-in the server already recorded is harmless: ingest is an
+// upsert of the node's vitals, so the duplicate just refreshes last_ping.
+func sendCheckIn(cfg *config, period time.Duration, metrics map[string]any, samples map[string]string) {
+	per := pushBudget(period) / pushAttempts
+	var err error
+	for i := 1; i <= pushAttempts; i++ {
+		if err = push(cfg, metrics, samples, per); err == nil {
+			if i > 1 {
+				log.Printf("pushed %d metric(s) (attempt %d)", len(metrics), i)
+			} else {
+				log.Printf("pushed %d metric(s)", len(metrics))
+			}
+			return
+		}
+		if i < pushAttempts {
+			log.Printf("push attempt %d/%d failed, retrying: %v", i, pushAttempts, err)
+		}
+	}
+	log.Printf("push failed after %d attempts (will retry next interval): %v", pushAttempts, err)
 }
 
 // runCustomAll executes every [custom] command CONCURRENTLY and returns the
@@ -419,17 +475,9 @@ func main() {
 // some fraction of its window already, and adding a whole period before
 // speaking up would page the very customer this change exists to protect.
 func pushLoop(cfg *config, period time.Duration, tick <-chan time.Time, once bool, stop <-chan struct{}) {
-	send := func(metrics map[string]any, samples map[string]string) {
-		if err := push(cfg, metrics, samples); err != nil {
-			log.Printf("push failed (will retry): %v", err)
-			return
-		}
-		log.Printf("pushed %d metric(s)", len(metrics))
-	}
-
 	// Announce ourselves straight away — see above.
 	metrics, samples := gather(cfg, period/2)
-	send(metrics, samples)
+	sendCheckIn(cfg, period, metrics, samples)
 	if once {
 		return
 	}
@@ -444,6 +492,6 @@ func pushLoop(cfg *config, period time.Duration, tick <-chan time.Time, once boo
 		case <-stop:
 			return
 		}
-		send(metrics, samples)
+		sendCheckIn(cfg, period, metrics, samples)
 	}
 }
