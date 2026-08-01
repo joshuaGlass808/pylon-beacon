@@ -16,6 +16,25 @@ Nothing scrapes you. Nothing listens. If the box goes silent, you get paged:
 
 ## Install
 
+**From source** (any platform with Go). This is the recommended route: the
+whole agent is standard-library Go across a dozen files, so reading it before
+you run it on your machines is actually realistic.
+
+```sh
+git clone https://github.com/joshuaGlass808/pylon-beacon
+cd pylon-beacon
+go build -o pylon-beacon .
+```
+
+### Convenience installers
+
+These fetch a shell script and execute it. That is a reasonable thing to be
+wary of — read it first if you like:
+
+```sh
+curl -fsSL https://pylonmon.com/beacon.sh | less
+```
+
 **Linux** — installs `/usr/local/bin/pylon-beacon`, writes
 `/etc/pylon-beacon.conf`, and registers a systemd unit:
 
@@ -32,12 +51,6 @@ irm https://pylonmon.com/beacon.ps1 | iex
 ```
 
 Both installers prompt for your API key (or read `PYLON_KEY` if set).
-
-**From source** (any platform with Go):
-
-```sh
-go build -o pylon-beacon .
-```
 
 ## The API key
 
