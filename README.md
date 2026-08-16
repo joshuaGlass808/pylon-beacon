@@ -102,6 +102,44 @@ Notes on `[custom]`:
 - Name metrics with units in the suffix (`_pct`, `_c`, `_s`) and PylonMon
   formats them accordingly.
 
+## Watching the LAN: `[probes]`
+
+PylonMon's own pollers live on the public internet — that's the point of
+off-site monitoring, and exactly why they can never reach the NAS at
+192.168.x, the hypervisor's UI, or anything else that rightly refuses to face
+the internet. The beacon already lives inside. `[probes]` has it check those
+targets from where it stands and ship each result with its push — every probe
+becomes its own monitor in PylonMon, with real measured latency, incidents
+and alerts.
+
+```ini
+[probes]
+# name = kind target [timeout-seconds]     kinds: http, tcp, ping
+pihole   = http http://192.168.1.240/admin
+nas_smb  = tcp 192.168.1.50:445
+gateway  = ping 192.168.1.1
+slow_box = http https://10.0.0.9:8443 10
+```
+
+Notes:
+
+- **Nothing is exposed.** Probes run from the beacon outward; the results
+  leave over the same outbound push as everything else. No listening socket,
+  no tunnel, no reverse proxy.
+- **http** counts anything below 500 as up — a 401 from a NAS login page is a
+  living service. Self-signed certificates are accepted: a probe asserts
+  liveness, not identity.
+- **tcp** is a plain connect. **ping** uses the system ping tool, so the
+  agent needs no special privileges.
+- Timeout defaults to 5 seconds. A probe that times out reports **down at
+  the timeout** — it never silently vanishes.
+- Probes run concurrently and are bounded by the push cycle, so a dark LAN
+  can never delay a check-in. Up to 20 per agent.
+- Each probe appears in PylonMon as its own monitor under this node and
+  inherits the node's alert channels. If the agent itself goes quiet, the
+  node's silence page covers everything — probes go stale rather than paging
+  twenty times.
+
 ## Watching network gear: `[snmp]`
 
 Switches, firewalls, APs, NAS boxes, PDUs and printers rarely run an agent —
@@ -264,6 +302,10 @@ curl -X POST https://pylonmon.com/api/ingest/exporter \
 
 `metrics` accepts numbers and one level of nesting (for per-mount disk and
 the like). Up to 40 metrics per push.
+
+`[probes]` results ride as an optional top-level `probes` array —
+`{"probes":[{"name":"pihole","kind":"http","target":"http://…","ok":true,"ms":12}]}` —
+one entry per probe per push. Servers that predate probes ignore the field.
 
 `[logwatch]` entries add an optional top-level `samples` object —
 `{"samples":{"tracebacks_5m":"Traceback (most recent call last):
