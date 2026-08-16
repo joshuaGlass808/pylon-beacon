@@ -38,6 +38,7 @@ type config struct {
 	Logwatch []*logWatch       // [logwatch] entries — see logwatch.go
 	SNMP     *snmpConfig       // [snmp] section — see snmp.go
 	Proxmox  *proxmoxConfig    // [proxmox] section — see proxmox.go
+	Probes   []*probe          // [probes] section — see probes.go
 }
 
 func defaultConfigPath() string {
@@ -105,6 +106,22 @@ func loadConfig(path string) (*config, error) {
 			default:
 				cfg.SNMP.OIDs[sanitizeMetricName(k)] = v
 			}
+			continue
+		}
+		if section == "probes" {
+			if k == "" || v == "" {
+				continue
+			}
+			p, perr := parseProbe(sanitizeMetricName(k), v)
+			if perr != nil {
+				fmt.Fprintln(os.Stderr, "probe "+k+": "+perr.Error()+" (entry skipped)")
+				continue
+			}
+			if len(cfg.Probes) >= probeCap {
+				fmt.Fprintln(os.Stderr, "probe "+k+": over the "+strconv.Itoa(probeCap)+"-probe limit (entry skipped)")
+				continue
+			}
+			cfg.Probes = append(cfg.Probes, p)
 			continue
 		}
 		if section == "logwatch" {
@@ -214,7 +231,7 @@ func runCustom(command string) (float64, bool) {
 	return f, perr == nil
 }
 
-func push(cfg *config, metrics map[string]any, samples map[string]string, timeout time.Duration) error {
+func push(cfg *config, metrics map[string]any, samples map[string]string, probes []probeResult, timeout time.Duration) error {
 	payload := map[string]any{
 		"node": cfg.Node, "interval": cfg.Interval, "metrics": metrics,
 	}
@@ -222,6 +239,10 @@ func push(cfg *config, metrics map[string]any, samples map[string]string, timeou
 		// text samples captured by [logwatch] — servers that predate them
 		// simply ignore the field
 		payload["samples"] = samples
+	}
+	if len(probes) > 0 {
+		// [probes] results — same deal, older servers ignore the field
+		payload["probes"] = probes
 	}
 	body, _ := json.Marshal(payload)
 	req, err := http.NewRequest("POST", cfg.URL+"/api/ingest/exporter", bytes.NewReader(body))
@@ -283,11 +304,11 @@ const pushAttempts = 2
 //
 // Re-sending a check-in the server already recorded is harmless: ingest is an
 // upsert of the node's vitals, so the duplicate just refreshes last_ping.
-func sendCheckIn(cfg *config, period time.Duration, metrics map[string]any, samples map[string]string) {
+func sendCheckIn(cfg *config, period time.Duration, metrics map[string]any, samples map[string]string, probes []probeResult) {
 	per := pushBudget(period) / pushAttempts
 	var err error
 	for i := 1; i <= pushAttempts; i++ {
-		if err = push(cfg, metrics, samples, per); err == nil {
+		if err = push(cfg, metrics, samples, probes, per); err == nil {
 			if i > 1 {
 				log.Printf("pushed %d metric(s) (attempt %d)", len(metrics), i)
 			} else {
@@ -359,7 +380,7 @@ func runCustomAll(custom map[string]string, deadline time.Duration) map[string]f
 // [logwatch] scan. The second return value is the logwatch text samples.
 //
 // budget bounds the custom-command phase — see runCustomAll.
-func gather(cfg *config, budget time.Duration) (map[string]any, map[string]string) {
+func gather(cfg *config, budget time.Duration) (map[string]any, map[string]string, []probeResult) {
 	metrics := collect() // platform-specific (collect_linux.go / collect_windows.go)
 	for name, v := range runCustomAll(cfg.Custom, budget) {
 		metrics[name] = v
@@ -385,7 +406,7 @@ func gather(cfg *config, budget time.Duration) (map[string]any, map[string]strin
 			samples[name] = s
 		}
 	}
-	return metrics, samples
+	return metrics, samples, runProbes(cfg.Probes, budget)
 }
 
 // banner prints the pylon-beacon mark once at startup when stdout is an
@@ -463,8 +484,8 @@ func main() {
 	if !*once {
 		banner(cfg)
 	}
-	log.Printf("pylon-beacon %s: node %q -> %s every %ds (%d custom metric(s), %d log watch(es))",
-		version, cfg.Node, cfg.URL, cfg.Interval, len(cfg.Custom), len(cfg.Logwatch))
+	log.Printf("pylon-beacon %s: node %q -> %s every %ds (%d custom metric(s), %d log watch(es), %d probe(s))",
+		version, cfg.Node, cfg.URL, cfg.Interval, len(cfg.Custom), len(cfg.Logwatch), len(cfg.Probes))
 
 	// The loop is a fixed-period TICKER, not sleep-after-work.
 	//
@@ -527,8 +548,8 @@ func main() {
 // speaking up would page the very customer this change exists to protect.
 func pushLoop(cfg *config, period time.Duration, tick <-chan time.Time, once bool, stop <-chan struct{}) {
 	// Announce ourselves straight away — see above.
-	metrics, samples := gather(cfg, period/2)
-	sendCheckIn(cfg, period, metrics, samples)
+	metrics, samples, probes := gather(cfg, period/2)
+	sendCheckIn(cfg, period, metrics, samples, probes)
 	if once {
 		return
 	}
@@ -537,12 +558,12 @@ func pushLoop(cfg *config, period time.Duration, tick <-chan time.Time, once boo
 		// Collect for the NEXT check-in while we are waiting for it, so that
 		// however long this takes, it is spent inside the period rather than
 		// added to it.
-		metrics, samples = gather(cfg, period/2)
+		metrics, samples, probes = gather(cfg, period/2)
 		select {
 		case <-tick:
 		case <-stop:
 			return
 		}
-		sendCheckIn(cfg, period, metrics, samples)
+		sendCheckIn(cfg, period, metrics, samples, probes)
 	}
 }
