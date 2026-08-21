@@ -23,6 +23,22 @@ func TestParseLogship(t *testing.T) {
 	if err != nil || ls.Service != "" {
 		t.Fatalf("optional service: %+v err=%v", ls, err)
 	}
+	// third field is a filter regex — alternation pipes belong to the regex
+	ls, err = parseLogship("ssh", "/var/log/auth.log | sshd | Failed password|Invalid user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ls.Service != "sshd" || ls.Filter == nil || !ls.Filter.MatchString("Invalid user admin") {
+		t.Fatalf("filter parse: %+v", ls)
+	}
+	// filter with the service left empty still derives from the file
+	ls, err = parseLogship("ssh", "/var/log/auth.log | | Failed")
+	if err != nil || ls.Service != "" || ls.Filter == nil {
+		t.Fatalf("empty-service filter: %+v err=%v", ls, err)
+	}
+	if _, err := parseLogship("bad", "/var/log/x.log | svc | ("); err == nil {
+		t.Fatal("bad filter regex accepted")
+	}
 }
 
 func TestLogshipDeriveService(t *testing.T) {
@@ -107,5 +123,41 @@ func TestLogshipCollect(t *testing.T) {
 	rows = ls.collect()
 	if len(rows) != 1 || rows[0].Msg != "after rotate" {
 		t.Fatalf("rotation: %+v", rows)
+	}
+}
+
+func TestLogshipFilterCollect(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "auth.log")
+	if err := os.WriteFile(path, []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ls, err := parseLogship("ssh", path+" | sshd | Failed password|Invalid user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ls.collect() // prime
+
+	f, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	f.WriteString("Accepted publickey for root from 10.0.0.2\n" +
+		"Failed password for root from 203.0.113.9\n" +
+		"Connection closed by 203.0.113.9\n" +
+		"Invalid user admin from 198.51.100.4\n")
+	f.Close()
+	rows := ls.collect()
+	if len(rows) != 2 {
+		t.Fatalf("filter kept %d rows: %+v", len(rows), rows)
+	}
+	if !strings.HasPrefix(rows[0].Msg, "Failed password") || !strings.HasPrefix(rows[1].Msg, "Invalid user") {
+		t.Fatalf("wrong rows survived: %+v", rows)
+	}
+	// the filter runs on the UNWRAPPED line — a docker-json envelope around a
+	// matching message still ships
+	f, _ = os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	f.WriteString(`{"log":"Failed password for git\n","stream":"stderr","time":"2026-08-21T02:00:00Z"}` + "\n")
+	f.Close()
+	rows = ls.collect()
+	if len(rows) != 1 || rows[0].Msg != "Failed password for git" {
+		t.Fatalf("unwrapped filter: %+v", rows)
 	}
 }

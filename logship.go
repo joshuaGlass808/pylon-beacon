@@ -8,9 +8,14 @@
 // END (installing the beacon must never replay last week), and truncation or
 // rotation restarts from the top of the new file.
 //
-// Entries are `name = <file-or-glob> | <service>`; the service is optional.
-// Globs are re-expanded every cycle, so `/var/log/containers/*.log` follows
-// pods as they come and go. Two container formats are unwrapped in place:
+// Entries are `name = <file-or-glob> | <service> | <filter-regex>`; the
+// service and filter are both optional. A filter ships only matching lines —
+// the tool for a file like auth.log where one line in a thousand is worth
+// keeping (leave the service empty, `glob | | regex`, to filter but still
+// derive the name from the file). The filter is matched against the line
+// AFTER container unwrapping, i.e. what you'd see in the portal. Globs are
+// re-expanded every cycle, so `/var/log/containers/*.log` follows pods as
+// they come and go. Two container formats are unwrapped in place:
 //
 //	docker json-file:  {"log":"the line\n","stream":"stderr","time":"…"}
 //	kubernetes CRI:    2026-08-21T02:41:00.123Z stdout F the line
@@ -51,7 +56,8 @@ var logshipClient = &http.Client{Timeout: 10 * time.Second}
 type logShip struct {
 	Name    string
 	Glob    string
-	Service string // optional — "" derives from the file
+	Service string         // optional — "" derives from the file
+	Filter  *regexp.Regexp // optional — nil ships every line
 
 	files map[string]*logshipFile // path -> tail state
 }
@@ -61,18 +67,34 @@ type logshipFile struct {
 	primed bool // first sight seeks to EOF
 }
 
-// parseLogship parses one `[logs]` entry: `name = <file-or-glob> | <service>`.
+// parseLogship parses one `[logs]` entry:
+//
+//	name = <file-or-glob> | <service> | <filter-regex>
+//
+// The filter is the LAST field precisely so it may contain `|` alternation —
+// everything after the second pipe is regex, verbatim.
 func parseLogship(name, spec string) (*logShip, error) {
-	parts := strings.SplitN(spec, "|", 2)
+	parts := strings.SplitN(spec, "|", 3)
 	glob := strings.TrimSpace(parts[0])
 	if glob == "" {
-		return nil, fmt.Errorf("want `file-or-glob | service`, got %q", spec)
+		return nil, fmt.Errorf("want `file-or-glob | service | filter-regex`, got %q", spec)
 	}
 	svc := ""
-	if len(parts) == 2 {
+	if len(parts) >= 2 {
 		svc = logshipServiceName(strings.TrimSpace(parts[1]))
 	}
-	return &logShip{Name: name, Glob: glob, Service: svc, files: map[string]*logshipFile{}}, nil
+	var filter *regexp.Regexp
+	if len(parts) == 3 {
+		src := strings.TrimSpace(parts[2])
+		if src != "" {
+			re, err := regexp.Compile(src)
+			if err != nil {
+				return nil, fmt.Errorf("bad filter regex %q: %v", src, err)
+			}
+			filter = re
+		}
+	}
+	return &logShip{Name: name, Glob: glob, Service: svc, Filter: filter, files: map[string]*logshipFile{}}, nil
 }
 
 // logshipServiceName mirrors the server's normalization: lowercase, a-z 0-9
@@ -200,7 +222,7 @@ func (ls *logShip) collect() []logshipRow {
 				if len(msg) > logshipLineMax {
 					msg = msg[:logshipLineMax] + "…[truncated]"
 				}
-				if msg != "" {
+				if msg != "" && (ls.Filter == nil || ls.Filter.MatchString(msg)) {
 					svc := ls.Service
 					if svc == "" {
 						svc = logshipDeriveService(path)

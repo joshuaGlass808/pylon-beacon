@@ -275,14 +275,21 @@ around the moment things broke, on the same screen that paged you.
 
 ```ini
 [logs]
-# name = <file-or-glob> | <service>      (service optional)
+# name = <file-or-glob> | <service> | <filter-regex>   (service and filter optional)
 app  = /var/log/myapp/*.log | myapp
 # Kubernetes / containerd: one entry covers every pod on the node.
 # Service names come from the CRI filename (pod_namespace_container).
 k8s  = /var/log/containers/*.log
+# A filter ships only matching lines — for files where one line in a
+# thousand is worth keeping. It's the LAST field, so `|` alternation
+# inside the regex just works. Leave the service empty (`| |`) to filter
+# while still deriving the service name from the file.
+ssh  = /var/log/auth.log | sshd | Failed password|Invalid user|authentication failure
 ```
 
 - Globs re-expand every cycle, so new pods and rotated files are picked up.
+- The filter is matched against the line **after** container unwrapping — the
+  same text you'd see in the portal, not the JSON envelope.
 - Docker `json-file` and Kubernetes CRI line formats are unwrapped
   automatically — you get the message, not the envelope — and their
   runtime timestamps are honored.
