@@ -27,7 +27,7 @@ import (
 	"time"
 )
 
-const version = "0.7.0"
+const version = "0.7.1"
 
 type config struct {
 	Key      string

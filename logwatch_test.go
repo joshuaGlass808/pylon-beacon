@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func mustWatch(t *testing.T, name, spec string) *logWatch {
@@ -113,5 +114,43 @@ func TestBackToBackBlocksBothCount(t *testing.T) {
 	}
 	if !strings.Contains(w.sample, "File b") {
 		t.Fatalf("sample should be the LATEST block:\n%s", w.sample)
+	}
+}
+
+func TestLogwatchGlob(t *testing.T) {
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a.log")
+	b := filepath.Join(dir, "b.log")
+	os.WriteFile(a, []byte("old ERROR ignored\n"), 0o644)
+	w, err := parseLogwatch("errs_5m", filepath.Join(dir, "*.log")+" | ERROR | 300")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Unix()
+	w.scan(now) // primes a.log at EOF
+	if len(w.hits) != 0 {
+		t.Fatalf("history counted: %d", len(w.hits))
+	}
+	// growth in an existing file and a brand-new file appearing in the glob
+	f, _ := os.OpenFile(a, os.O_APPEND|os.O_WRONLY, 0o644)
+	f.WriteString("fresh ERROR one\n")
+	f.Close()
+	os.WriteFile(b, []byte("ERROR that predates b's priming\n"), 0o644)
+	w.scan(now + 1) // a counts its append; b only primes
+	if len(w.hits) != 1 {
+		t.Fatalf("after append: %d hits, want 1", len(w.hits))
+	}
+	f, _ = os.OpenFile(b, os.O_APPEND|os.O_WRONLY, 0o644)
+	f.WriteString("ERROR in b\nERROR again in b\n")
+	f.Close()
+	w.scan(now + 2)
+	if len(w.hits) != 3 {
+		t.Fatalf("across files: %d hits, want 3", len(w.hits))
+	}
+	// a file leaving the glob is forgotten
+	os.Remove(b)
+	w.scan(now + 3)
+	if _, ok := w.files[b]; ok {
+		t.Fatal("removed file still tracked")
 	}
 }

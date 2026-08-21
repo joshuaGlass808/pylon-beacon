@@ -252,8 +252,12 @@ Notes on `[logwatch]`:
 
 - Reading is incremental — only what the file grew since the last push is
   scanned, capped at 4 MB per cycle so a log flood can't stall the beacon.
-- On first start the watch begins at the **end** of the file: installing the
-  beacon never pages you about last week's errors.
+- The file may be a **glob** (`/var/lib/docker/containers/*/*.log`),
+  re-expanded every cycle — matches count across every file it finds, so
+  container churn and rotation don't lose the thread.
+- On first start (and for each file a glob newly finds) the watch begins at
+  the **end** of the file: installing the beacon never pages you about last
+  week's errors.
 - Truncation and rotation are detected (file shrank) and the watch restarts
   from the top of the new file.
 - Block capture is traceback-shaped: the matched line, its indented

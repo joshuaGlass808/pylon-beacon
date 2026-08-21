@@ -2,8 +2,10 @@
 // most recent matched block along with the push.
 //
 // The itch: "a few tracebacks are normal, a SPIKE is not — and when it spikes,
-// the page should contain the traceback." Each entry tails a file, counts
-// regex matches inside its window, and reports that count as a normal metric
+// the page should contain the traceback." Each entry tails a file — or a glob
+// of files, re-expanded every cycle, so `/var/lib/docker/containers/*/*.log`
+// keeps working as containers come and go — counts regex matches inside its
+// window, and reports that count as a normal metric
 // (so PylonMon vital rules like `tracebacks_5m > 20 sustained 60s` just work).
 // The latest matched block rides in the push as a text sample, so a breach
 // page can show the actual error instead of a number.
@@ -21,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -36,15 +39,21 @@ const (
 
 type logWatch struct {
 	Name   string
-	File   string
+	File   string // a path or a glob — re-expanded every cycle
 	Re     *regexp.Regexp
 	Window int // seconds
 
-	// state between cycles
-	offset int64
-	primed bool    // first cycle done (we start at EOF, not at byte 0)
+	// state between cycles. Matches and the sample aggregate across every
+	// file the glob finds — "nginx 5xx across all its logs" is one number.
+	files  map[string]*logwatchTail
 	hits   []int64 // unix timestamps of matches, pruned to Window
 	sample string  // most recent captured block
+}
+
+// logwatchTail is one file's read position.
+type logwatchTail struct {
+	offset int64
+	primed bool // first sight starts at EOF, not at byte 0
 }
 
 // parseLogwatch parses one `[logwatch]` entry:
@@ -79,16 +88,36 @@ func parseLogwatch(name, spec string) (*logWatch, error) {
 	if window < 15 {
 		window = 15
 	}
-	return &logWatch{Name: name, File: file, Re: re, Window: window}, nil
+	return &logWatch{Name: name, File: file, Re: re, Window: window, files: map[string]*logwatchTail{}}, nil
 }
 
-// scan reads whatever the file grew since the last cycle, updates the rolling
-// match count, and refreshes the captured sample. Any error (file missing,
-// unreadable) reports the current window count and tries again next cycle —
-// a broken watch must never break the push.
+// scan expands the glob and reads whatever each matched file grew since the
+// last cycle, updating the rolling match count and the captured sample. Any
+// error (file missing, unreadable) reports the current window count and tries
+// again next cycle — a broken watch must never break the push.
 func (w *logWatch) scan(now int64) {
 	defer w.prune(now)
-	f, err := os.Open(w.File)
+	paths, _ := filepath.Glob(w.File)
+	seen := map[string]bool{}
+	for _, path := range paths {
+		seen[path] = true
+		w.scanFile(path, now)
+	}
+	// forget files the glob no longer finds (rotated away, container gone)
+	for p := range w.files {
+		if !seen[p] {
+			delete(w.files, p)
+		}
+	}
+}
+
+func (w *logWatch) scanFile(path string, now int64) {
+	t := w.files[path]
+	if t == nil {
+		t = &logwatchTail{}
+		w.files[path] = t
+	}
+	f, err := os.Open(path)
 	if err != nil {
 		return
 	}
@@ -98,23 +127,23 @@ func (w *logWatch) scan(now int64) {
 		return
 	}
 	size := st.Size()
-	if !w.primed {
+	if !t.primed {
 		// first sight of the file: start at the end — history is not news
-		w.offset, w.primed = size, true
+		t.offset, t.primed = size, true
 		return
 	}
-	if size < w.offset {
-		w.offset = 0 // truncated or rotated: the new file starts fresh
+	if size < t.offset {
+		t.offset = 0 // truncated or rotated: the new file starts fresh
 	}
-	if size == w.offset {
+	if size == t.offset {
 		return
 	}
-	if _, err := f.Seek(w.offset, io.SeekStart); err != nil {
+	if _, err := f.Seek(t.offset, io.SeekStart); err != nil {
 		return
 	}
 	// cap the read so a runaway log can't stall the push loop; we catch up
 	// next cycle
-	remaining := size - w.offset
+	remaining := size - t.offset
 	if remaining > logwatchMaxScan {
 		remaining = logwatchMaxScan
 	}
@@ -162,7 +191,7 @@ func (w *logWatch) scan(now int64) {
 		}
 	}
 	flush()
-	w.offset += consumed
+	t.offset += consumed
 }
 
 // prune drops match timestamps that fell out of the window.
