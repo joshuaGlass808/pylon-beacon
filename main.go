@@ -27,7 +27,7 @@ import (
 	"time"
 )
 
-const version = "0.6.0"
+const version = "0.7.0"
 
 type config struct {
 	Key      string
@@ -36,6 +36,7 @@ type config struct {
 	Interval int
 	Custom   map[string]string // metric name -> command
 	Logwatch []*logWatch       // [logwatch] entries — see logwatch.go
+	Logs     []*logShip        // [logs] entries — see logship.go
 	SNMP     *snmpConfig       // [snmp] section — see snmp.go
 	Proxmox  *proxmoxConfig    // [proxmox] section — see proxmox.go
 	Probes   []*probe          // [probes] section — see probes.go
@@ -134,6 +135,18 @@ func loadConfig(path string) (*config, error) {
 				continue
 			}
 			cfg.Logwatch = append(cfg.Logwatch, w)
+			continue
+		}
+		if section == "logs" {
+			if k == "" || v == "" {
+				continue
+			}
+			ls, lerr := parseLogship(k, v)
+			if lerr != nil {
+				fmt.Fprintln(os.Stderr, "logs "+k+": "+lerr.Error()+" (entry skipped)")
+				continue
+			}
+			cfg.Logs = append(cfg.Logs, ls)
 			continue
 		}
 		// [proxmox] — reports the hypervisor's guests, storage and quorum, not
@@ -484,8 +497,8 @@ func main() {
 	if !*once {
 		banner(cfg)
 	}
-	log.Printf("pylon-beacon %s: node %q -> %s every %ds (%d custom metric(s), %d log watch(es), %d probe(s))",
-		version, cfg.Node, cfg.URL, cfg.Interval, len(cfg.Custom), len(cfg.Logwatch), len(cfg.Probes))
+	log.Printf("pylon-beacon %s: node %q -> %s every %ds (%d custom metric(s), %d log watch(es), %d log stream(s), %d probe(s))",
+		version, cfg.Node, cfg.URL, cfg.Interval, len(cfg.Custom), len(cfg.Logwatch), len(cfg.Logs), len(cfg.Probes))
 
 	// The loop is a fixed-period TICKER, not sleep-after-work.
 	//
@@ -550,6 +563,7 @@ func pushLoop(cfg *config, period time.Duration, tick <-chan time.Time, once boo
 	// Announce ourselves straight away — see above.
 	metrics, samples, probes := gather(cfg, period/2)
 	sendCheckIn(cfg, period, metrics, samples, probes)
+	shipLogs(cfg, logshipClient)
 	if once {
 		return
 	}
@@ -565,5 +579,8 @@ func pushLoop(cfg *config, period time.Duration, tick <-chan time.Time, once boo
 			return
 		}
 		sendCheckIn(cfg, period, metrics, samples, probes)
+		// logs ride the same tick, after the check-in — a slow log post must
+		// never make the node look silent
+		shipLogs(cfg, logshipClient)
 	}
 }

@@ -262,6 +262,39 @@ Notes on `[logwatch]`:
 - The window defaults to 300s; minimum 15s. Name entries like metrics
   (`_5m`, `_1h` suffixes read well on the dashboard).
 
+## Shipping logs: `[logs]`
+
+`[logwatch]` counts error patterns so you can alert on a spike. `[logs]` ships
+the lines themselves, so they show up in PylonMon's **Logs → Log streams**
+search (live tail included) and on every **incident** — the log lines from
+around the moment things broke, on the same screen that paged you.
+
+```ini
+[logs]
+# name = <file-or-glob> | <service>      (service optional)
+app  = /var/log/myapp/*.log | myapp
+# Kubernetes / containerd: one entry covers every pod on the node.
+# Service names come from the CRI filename (pod_namespace_container).
+k8s  = /var/log/containers/*.log
+```
+
+- Globs re-expand every cycle, so new pods and rotated files are picked up.
+- Docker `json-file` and Kubernetes CRI line formats are unwrapped
+  automatically — you get the message, not the envelope — and their
+  runtime timestamps are honored.
+- A light guess at the level (`ERROR`/`warn`/`panic`…) makes PylonMon's
+  severity filters useful; JSON logs with a `level` field are read as-is.
+- Same discipline as `[logwatch]`: first sight starts at the **end** of the
+  file, rotation restarts from the top, and reads are capped per cycle so a
+  log flood can't eat the box.
+- Delivery is deliberately lossy under pressure: lines go out once per
+  check-in interval in one bounded batch, and if the server is shedding (your
+  plan's daily cap, or a flood) the batch is dropped rather than retried —
+  paging always outranks log intake.
+
+Plan limits (retention and daily volume) are on the
+[pricing page](https://pylonmon.com/#pricing).
+
 ## Built-in collectors
 
 | Metric        | Linux source              | Windows source            |
